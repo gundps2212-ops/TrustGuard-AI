@@ -8,10 +8,6 @@ from modules.supabase_manager import (
 )
 
 
-# =========================================================
-# CONSTANTS
-# =========================================================
-
 VALID_ROLES = {
     "user",
     "admin",
@@ -29,9 +25,10 @@ VALID_CLAIM_STATUSES = {
 # HELPERS
 # =========================================================
 
-def validate_user_id(
-    user_id: Any,
-) -> str:
+def validate_user_id(user_id: Any) -> str:
+    """
+    Supabase user ID is a UUID string.
+    """
 
     clean_user_id = str(
         user_id or ""
@@ -39,10 +36,39 @@ def validate_user_id(
 
     if not clean_user_id:
         raise ValueError(
-            "Supabase User UUID is required."
+            "Valid Supabase user ID is required."
         )
 
     return clean_user_id
+
+
+def validate_tokens(
+    access_token: str,
+    refresh_token: str,
+) -> tuple[str, str]:
+
+    access_token = str(
+        access_token or ""
+    ).strip()
+
+    refresh_token = str(
+        refresh_token or ""
+    ).strip()
+
+    if not access_token:
+        raise ValueError(
+            "Access token is required."
+        )
+
+    if not refresh_token:
+        raise ValueError(
+            "Refresh token is required."
+        )
+
+    return (
+        access_token,
+        refresh_token,
+    )
 
 
 def safe_int(
@@ -71,22 +97,19 @@ def get_admin_client(
 ):
     """
     Create authenticated Supabase client
-    and verify administrator role.
+    and confirm logged-in user is admin.
     """
 
-    clean_user_id = validate_user_id(
+    user_id = validate_user_id(
         user_id
     )
 
-    if not access_token:
-        raise ValueError(
-            "Access token is missing."
+    access_token, refresh_token = (
+        validate_tokens(
+            access_token,
+            refresh_token,
         )
-
-    if not refresh_token:
-        raise ValueError(
-            "Refresh token is missing."
-        )
+    )
 
     client = create_authenticated_client(
         access_token=access_token,
@@ -101,7 +124,7 @@ def get_admin_client(
         )
         .eq(
             "id",
-            clean_user_id,
+            user_id,
         )
         .limit(1)
         .execute()
@@ -109,7 +132,7 @@ def get_admin_client(
 
     if not response.data:
         raise PermissionError(
-            "Administrator profile was not found."
+            "Admin profile was not found."
         )
 
     profile = response.data[0]
@@ -119,7 +142,7 @@ def get_admin_client(
             "role",
             "user",
         )
-    ).strip().lower()
+    ).lower()
 
     if role != "admin":
         raise PermissionError(
@@ -130,7 +153,7 @@ def get_admin_client(
 
 
 # =========================================================
-# COUNT ROWS
+# COUNT
 # =========================================================
 
 def get_exact_count(
@@ -145,23 +168,22 @@ def get_exact_count(
             "id",
             count="exact",
         )
+        .limit(1)
         .execute()
     )
 
-    count_value = getattr(
+    count = getattr(
         response,
         "count",
         None,
     )
 
-    if count_value is not None:
-        return int(
-            count_value
+    if count is None:
+        return len(
+            response.data or []
         )
 
-    return len(
-        response.data or []
-    )
+    return int(count)
 
 
 # =========================================================
@@ -208,18 +230,17 @@ def get_admin_statistics(
 
     scores = []
 
-    active_user_ids = set()
+    active_users = set()
 
     for row in rows:
 
-        current_user_id = row.get(
+        row_user_id = row.get(
             "user_id"
         )
 
-        if current_user_id:
-
-            active_user_ids.add(
-                str(current_user_id)
+        if row_user_id:
+            active_users.add(
+                str(row_user_id)
             )
 
         scores.append(
@@ -253,14 +274,16 @@ def get_admin_statistics(
         lowest_score = 0
 
     return {
-        "total_users": total_users,
+        "total_users": (
+            total_users
+        ),
 
         "total_verifications": (
             total_verifications
         ),
 
         "active_users": len(
-            active_user_ids
+            active_users
         ),
 
         "total_evaluated_claims": (
@@ -348,6 +371,17 @@ def get_recent_verifications(
         refresh_token=refresh_token,
     )
 
+    limit = max(
+        1,
+        min(
+            safe_int(
+                limit,
+                30,
+            ),
+            200,
+        ),
+    )
+
     verification_response = (
         client
         .table("verifications")
@@ -382,14 +416,11 @@ def get_recent_verifications(
     )
 
     profile_map = {
-        str(profile.get("id")):
-        profile.get(
+        str(row["id"]): row.get(
             "username",
             "Unknown User",
         )
-
-        for profile
-        in (
+        for row in (
             profile_response.data
             or []
         )
@@ -466,7 +497,7 @@ def get_user_activity(
         refresh_token=refresh_token,
     )
 
-    profile_response = (
+    profiles_response = (
         client
         .table("profiles")
         .select(
@@ -475,7 +506,7 @@ def get_user_activity(
         .execute()
     )
 
-    verification_response = (
+    verifications_response = (
         client
         .table("verifications")
         .select(
@@ -485,16 +516,16 @@ def get_user_activity(
     )
 
     profiles = (
-        profile_response.data
+        profiles_response.data
         or []
     )
 
     verifications = (
-        verification_response.data
+        verifications_response.data
         or []
     )
 
-    activity_map = defaultdict(
+    activity = defaultdict(
         lambda: {
             "count": 0,
             "scores": [],
@@ -511,15 +542,15 @@ def get_user_activity(
             )
         )
 
-        activity = activity_map[
+        user_activity = activity[
             verification_user_id
         ]
 
-        activity[
+        user_activity[
             "count"
         ] += 1
 
-        activity[
+        user_activity[
             "scores"
         ].append(
             safe_int(
@@ -534,19 +565,20 @@ def get_user_activity(
             "created_at"
         )
 
-        last_verification = activity.get(
-            "last_verification"
-        )
-
         if (
             created_at
             and (
-                last_verification is None
-                or created_at > last_verification
+                user_activity[
+                    "last_verification"
+                ]
+                is None
+                or created_at
+                > user_activity[
+                    "last_verification"
+                ]
             )
         ):
-
-            activity[
+            user_activity[
                 "last_verification"
             ] = created_at
 
@@ -561,19 +593,21 @@ def get_user_activity(
             )
         )
 
-        activity = activity_map[
+        current = activity[
             profile_id
         ]
 
-        scores = activity[
+        scores = current[
             "scores"
         ]
 
-        average_score = (
-            sum(scores) / len(scores)
-            if scores
-            else 0.0
-        )
+        if scores:
+            average_score = (
+                sum(scores)
+                / len(scores)
+            )
+        else:
+            average_score = 0.0
 
         results.append(
             {
@@ -596,20 +630,18 @@ def get_user_activity(
                 ),
 
                 "verification_count": (
-                    activity[
+                    current[
                         "count"
                     ]
                 ),
 
-                "average_trust_score": (
-                    round(
-                        average_score,
-                        2,
-                    )
+                "average_trust_score": round(
+                    average_score,
+                    2,
                 ),
 
                 "last_verification": (
-                    activity[
+                    current[
                         "last_verification"
                     ]
                 ),
@@ -617,7 +649,7 @@ def get_user_activity(
         )
 
     results.sort(
-        key=lambda row: row[
+        key=lambda item: item[
             "verification_count"
         ],
         reverse=True,
@@ -699,7 +731,6 @@ def get_score_distribution(
             "score_range": key,
             "report_count": value,
         }
-
         for key, value
         in distribution.items()
     ]
@@ -752,24 +783,12 @@ def get_claim_status_distribution(
         ):
             continue
 
-        claim_results = report.get(
+        claims = report.get(
             "claim_results",
             [],
         )
 
-        if not isinstance(
-            claim_results,
-            list,
-        ):
-            continue
-
-        for claim in claim_results:
-
-            if not isinstance(
-                claim,
-                dict,
-            ):
-                continue
+        for claim in claims:
 
             status = str(
                 claim.get(
@@ -792,7 +811,6 @@ def get_claim_status_distribution(
             "status": status,
             "claim_count": count,
         }
-
         for status, count
         in counts.items()
     ]
@@ -857,7 +875,7 @@ def get_user_details(
         .execute()
     )
 
-    rows = (
+    verification_rows = (
         verification_response.data
         or []
     )
@@ -869,23 +887,26 @@ def get_user_details(
                 0,
             )
         )
-
-        for row in rows
+        for row
+        in verification_rows
     ]
 
     average_score = (
-        sum(scores) / len(scores)
+        sum(scores)
+        / len(scores)
         if scores
         else 0.0
     )
 
-    last_verification = (
-        rows[0].get(
-            "created_at"
+    last_verification = None
+
+    if verification_rows:
+        last_verification = (
+            verification_rows[0]
+            .get(
+                "created_at"
+            )
         )
-        if rows
-        else None
-    )
 
     return {
         "id": profile.get(
@@ -907,7 +928,7 @@ def get_user_details(
         ),
 
         "verification_count": len(
-            rows
+            verification_rows
         ),
 
         "average_trust_score": round(
@@ -922,7 +943,7 @@ def get_user_details(
 
 
 # =========================================================
-# COUNT ADMIN ACCOUNTS
+# ADMIN COUNT
 # =========================================================
 
 def count_admin_accounts(
@@ -951,16 +972,14 @@ def count_admin_accounts(
         .execute()
     )
 
-    count_value = getattr(
+    count = getattr(
         response,
         "count",
         None,
     )
 
-    if count_value is not None:
-        return int(
-            count_value
-        )
+    if count is not None:
+        return int(count)
 
     return len(
         response.data or []
@@ -987,11 +1006,11 @@ def change_user_role(
         acting_admin_id
     )
 
-    clean_role = str(
+    new_role = str(
         new_role or ""
     ).strip().lower()
 
-    if clean_role not in VALID_ROLES:
+    if new_role not in VALID_ROLES:
 
         return (
             False,
@@ -1035,37 +1054,45 @@ def change_user_role(
             "Selected user was not found.",
         )
 
-    target = response.data[0]
+    target_user = (
+        response.data[0]
+    )
 
-    username = target.get(
+    username = target_user.get(
         "username",
         "User",
     )
 
     current_role = str(
-        target.get(
+        target_user.get(
             "role",
             "user",
         )
     ).lower()
 
-    if current_role == clean_role:
+    if current_role == new_role:
 
         return (
             False,
             f"{username} already has "
-            f"the {clean_role} role.",
+            f"the {new_role} role.",
         )
 
     if (
         current_role == "admin"
-        and clean_role == "user"
+        and new_role == "user"
     ):
 
         admin_count = count_admin_accounts(
-            acting_admin_id=acting_admin_id,
-            access_token=access_token,
-            refresh_token=refresh_token,
+            acting_admin_id=(
+                acting_admin_id
+            ),
+            access_token=(
+                access_token
+            ),
+            refresh_token=(
+                refresh_token
+            ),
         )
 
         if admin_count <= 1:
@@ -1081,7 +1108,7 @@ def change_user_role(
         .table("profiles")
         .update(
             {
-                "role": clean_role,
+                "role": new_role
             }
         )
         .eq(
@@ -1098,12 +1125,11 @@ def change_user_role(
 
         return (
             False,
-            "Role update failed. "
-            "Check profiles RLS policy.",
+            "Role update failed or was blocked by RLS.",
         )
 
     return (
         True,
         f"{username}'s role changed "
-        f"to {clean_role} successfully.",
+        f"to {new_role} successfully.",
     )

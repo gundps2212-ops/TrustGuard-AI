@@ -1,247 +1,467 @@
-import json
-import sqlite3
-from pathlib import Path
+from __future__ import annotations
+
 from typing import Any
 
+from modules.supabase_manager import (
+    create_authenticated_client,
+)
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATABASE_DIRECTORY = PROJECT_ROOT / "database"
-DATABASE_PATH = DATABASE_DIRECTORY / "trustguard.db"
 
-
-def get_connection() -> sqlite3.Connection:
-    """
-    Create and return a SQLite database connection.
-    """
-
-    DATABASE_DIRECTORY.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    connection = sqlite3.connect(
-        DATABASE_PATH,
-        timeout=10,
-    )
-
-    connection.row_factory = sqlite3.Row
-
-    return connection
-
+# =========================================================
+# COMPATIBILITY FUNCTION
+# =========================================================
 
 def init_database() -> None:
     """
-    Create the verification table and migrate older databases
-    by adding a user_id column when required.
+    Database tables are now managed by Supabase.
+
+    This function is kept temporarily so that older
+    pages importing init_database() do not crash.
     """
 
-    create_table_query = """
-    CREATE TABLE IF NOT EXISTS verifications (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        created_at TEXT NOT NULL,
-        document_name TEXT NOT NULL,
-        question TEXT NOT NULL,
-        ai_answer TEXT NOT NULL,
-        overall_score INTEGER NOT NULL,
-        trust_level TEXT NOT NULL,
-        final_verified_response TEXT NOT NULL,
-        report_json TEXT NOT NULL
-    )
+    return None
+
+
+# =========================================================
+# HELPERS
+# =========================================================
+
+def validate_user_id(
+    user_id: Any,
+) -> str:
+    """
+    Validate Supabase UUID user ID.
     """
 
-    with get_connection() as connection:
-        connection.execute(create_table_query)
+    clean_user_id = str(
+        user_id or ""
+    ).strip()
 
-        columns = {
-            row["name"]
-            for row in connection.execute(
-                "PRAGMA table_info(verifications)"
-            ).fetchall()
-        }
-
-        # Migration for the old shared-history database
-        if "user_id" not in columns:
-            connection.execute(
-                """
-                ALTER TABLE verifications
-                ADD COLUMN user_id INTEGER
-                """
-            )
-
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS
-            idx_verifications_user_id
-            ON verifications(user_id)
-            """
-        )
-
-        connection.commit()
-
-
-def save_verification(
-    report_data: dict[str, Any],
-    user_id: int,
-) -> int:
-    """
-    Save a verification report for one logged-in user.
-
-    Returns:
-        Newly created verification record ID.
-    """
-
-    if not isinstance(user_id, int) or user_id <= 0:
+    if not clean_user_id:
         raise ValueError(
             "A valid logged-in user ID is required."
         )
 
-    query = """
-    INSERT INTO verifications (
-        user_id,
-        created_at,
-        document_name,
-        question,
-        ai_answer,
-        overall_score,
-        trust_level,
-        final_verified_response,
-        report_json
-    )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+    return clean_user_id
+
+
+def validate_tokens(
+    access_token: str,
+    refresh_token: str,
+) -> tuple[str, str]:
+    """
+    Validate authentication tokens.
     """
 
-    values = (
-        user_id,
-        report_data.get("report_generated_at", ""),
-        report_data.get("document_name", ""),
-        report_data.get("question", ""),
-        report_data.get("original_ai_answer", ""),
-        int(report_data.get("overall_trust_score", 0)),
-        report_data.get("trust_level", ""),
-        report_data.get("final_verified_response", ""),
-        json.dumps(
-            report_data,
-            ensure_ascii=False,
-        ),
-    )
+    clean_access_token = str(
+        access_token or ""
+    ).strip()
 
-    with get_connection() as connection:
-        cursor = connection.execute(
-            query,
-            values,
+    clean_refresh_token = str(
+        refresh_token or ""
+    ).strip()
+
+    if not clean_access_token:
+        raise ValueError(
+            "Supabase access token is required."
         )
 
-        connection.commit()
+    if not clean_refresh_token:
+        raise ValueError(
+            "Supabase refresh token is required."
+        )
 
-        return int(cursor.lastrowid)
+    return (
+        clean_access_token,
+        clean_refresh_token,
+    )
 
+
+def safe_integer(
+    value: Any,
+    default: int = 0,
+) -> int:
+    """
+    Safely convert a value into integer.
+    """
+
+    try:
+        return int(value)
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return default
+
+
+# =========================================================
+# SAVE VERIFICATION
+# =========================================================
+
+def save_verification(
+    report_data: dict[str, Any],
+    user_id: str,
+    access_token: str,
+    refresh_token: str,
+) -> int:
+    """
+    Save one TrustGuard verification report to Supabase.
+
+    RLS ensures that a user can insert only a row
+    whose user_id matches auth.uid().
+    """
+
+    if not isinstance(
+        report_data,
+        dict,
+    ):
+        raise TypeError(
+            "report_data must be a dictionary."
+        )
+
+    clean_user_id = validate_user_id(
+        user_id
+    )
+
+    (
+        clean_access_token,
+        clean_refresh_token,
+    ) = validate_tokens(
+        access_token,
+        refresh_token,
+    )
+
+    client = create_authenticated_client(
+        access_token=clean_access_token,
+        refresh_token=clean_refresh_token,
+    )
+
+    record = {
+        "user_id": clean_user_id,
+
+        "document_name": str(
+            report_data.get(
+                "document_name",
+                "",
+            )
+        ),
+
+        "question": str(
+            report_data.get(
+                "question",
+                "",
+            )
+        ),
+
+        "ai_answer": str(
+            report_data.get(
+                "original_ai_answer",
+                "",
+            )
+        ),
+
+        "overall_score": safe_integer(
+            report_data.get(
+                "overall_trust_score",
+                0,
+            )
+        ),
+
+        "trust_level": str(
+            report_data.get(
+                "trust_level",
+                "",
+            )
+        ),
+
+        "final_verified_response": str(
+            report_data.get(
+                "final_verified_response",
+                "",
+            )
+        ),
+
+        # JSONB column
+        "report_json": report_data,
+    }
+
+    response = (
+        client
+        .table("verifications")
+        .insert(record)
+        .select("id")
+        .execute()
+    )
+
+    if not response.data:
+        raise RuntimeError(
+            "Verification was not saved to Supabase."
+        )
+
+    saved_record = response.data[0]
+
+    record_id = saved_record.get(
+        "id"
+    )
+
+    if record_id is None:
+        raise RuntimeError(
+            "Supabase did not return a verification ID."
+        )
+
+    return int(
+        record_id
+    )
+
+
+# =========================================================
+# GET USER VERIFICATION HISTORY
+# =========================================================
 
 def get_verification_history(
-    user_id: int,
+    user_id: str,
+    access_token: str,
+    refresh_token: str,
     limit: int = 100,
 ) -> list[dict[str, Any]]:
     """
-    Return verification history belonging only to one user.
+    Return verification history for one logged-in user.
     """
 
-    if not isinstance(user_id, int) or user_id <= 0:
-        return []
+    clean_user_id = validate_user_id(
+        user_id
+    )
+
+    (
+        clean_access_token,
+        clean_refresh_token,
+    ) = validate_tokens(
+        access_token,
+        refresh_token,
+    )
+
+    try:
+        safe_limit = int(
+            limit
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ):
+        safe_limit = 100
 
     safe_limit = max(
         1,
-        min(int(limit), 500),
+        min(
+            safe_limit,
+            500,
+        ),
     )
 
-    query = """
-    SELECT
-        id,
-        created_at,
-        document_name,
-        question,
-        overall_score,
-        trust_level
-    FROM verifications
-    WHERE user_id = ?
-    ORDER BY id DESC
-    LIMIT ?
-    """
+    client = create_authenticated_client(
+        access_token=clean_access_token,
+        refresh_token=clean_refresh_token,
+    )
 
-    with get_connection() as connection:
-        rows = connection.execute(
-            query,
+    response = (
+        client
+        .table("verifications")
+        .select(
             (
-                user_id,
-                safe_limit,
-            ),
-        ).fetchall()
+                "id,"
+                "created_at,"
+                "document_name,"
+                "question,"
+                "overall_score,"
+                "trust_level"
+            )
+        )
+        .eq(
+            "user_id",
+            clean_user_id,
+        )
+        .order(
+            "created_at",
+            desc=True,
+        )
+        .limit(
+            safe_limit
+        )
+        .execute()
+    )
 
-    return [
-        dict(row)
-        for row in rows
-    ]
+    if not response.data:
+        return []
 
+    return list(
+        response.data
+    )
+
+
+# =========================================================
+# GET ONE VERIFICATION REPORT
+# =========================================================
 
 def get_verification_details(
     record_id: int,
-    user_id: int,
+    user_id: str,
+    access_token: str,
+    refresh_token: str,
 ) -> dict[str, Any] | None:
     """
-    Return a report only when it belongs to the given user.
+    Return one user's verification report.
+
+    Both the explicit user filter and RLS protect the row.
     """
-
-    query = """
-    SELECT report_json
-    FROM verifications
-    WHERE id = ?
-      AND user_id = ?
-    LIMIT 1
-    """
-
-    with get_connection() as connection:
-        row = connection.execute(
-            query,
-            (
-                record_id,
-                user_id,
-            ),
-        ).fetchone()
-
-    if row is None:
-        return None
 
     try:
-        return json.loads(
-            row["report_json"]
+        safe_record_id = int(
+            record_id
         )
 
-    except json.JSONDecodeError:
+    except (
+        TypeError,
+        ValueError,
+    ):
         return None
 
+    if safe_record_id <= 0:
+        return None
+
+    clean_user_id = validate_user_id(
+        user_id
+    )
+
+    (
+        clean_access_token,
+        clean_refresh_token,
+    ) = validate_tokens(
+        access_token,
+        refresh_token,
+    )
+
+    client = create_authenticated_client(
+        access_token=clean_access_token,
+        refresh_token=clean_refresh_token,
+    )
+
+    response = (
+        client
+        .table("verifications")
+        .select(
+            "id, user_id, report_json"
+        )
+        .eq(
+            "id",
+            safe_record_id,
+        )
+        .eq(
+            "user_id",
+            clean_user_id,
+        )
+        .limit(1)
+        .execute()
+    )
+
+    if not response.data:
+        return None
+
+    record = response.data[0]
+
+    report = record.get(
+        "report_json"
+    )
+
+    if not isinstance(
+        report,
+        dict,
+    ):
+        return None
+
+    return report
+
+
+# =========================================================
+# DELETE VERIFICATION
+# =========================================================
 
 def delete_verification(
     record_id: int,
-    user_id: int,
+    user_id: str,
+    access_token: str,
+    refresh_token: str,
 ) -> bool:
     """
-    Delete a record only when it belongs to the given user.
+    Delete a verification report belonging to
+    the logged-in user.
     """
 
-    query = """
-    DELETE FROM verifications
-    WHERE id = ?
-      AND user_id = ?
-    """
-
-    with get_connection() as connection:
-        cursor = connection.execute(
-            query,
-            (
-                record_id,
-                user_id,
-            ),
+    try:
+        safe_record_id = int(
+            record_id
         )
 
-        connection.commit()
+    except (
+        TypeError,
+        ValueError,
+    ):
+        return False
 
-        return cursor.rowcount > 0
+    if safe_record_id <= 0:
+        return False
+
+    clean_user_id = validate_user_id(
+        user_id
+    )
+
+    (
+        clean_access_token,
+        clean_refresh_token,
+    ) = validate_tokens(
+        access_token,
+        refresh_token,
+    )
+
+    client = create_authenticated_client(
+        access_token=clean_access_token,
+        refresh_token=clean_refresh_token,
+    )
+
+    # First confirm that the user can see this row.
+    existing_response = (
+        client
+        .table("verifications")
+        .select("id")
+        .eq(
+            "id",
+            safe_record_id,
+        )
+        .eq(
+            "user_id",
+            clean_user_id,
+        )
+        .limit(1)
+        .execute()
+    )
+
+    if not existing_response.data:
+        return False
+
+    (
+        client
+        .table("verifications")
+        .delete()
+        .eq(
+            "id",
+            safe_record_id,
+        )
+        .eq(
+            "user_id",
+            clean_user_id,
+        )
+        .execute()
+    )
+
+    return True

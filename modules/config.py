@@ -15,24 +15,27 @@ def get_secret(
     default: Optional[str] = None,
 ) -> Optional[str]:
     """
-    Read a secret from:
-
-    1. Streamlit Cloud secrets
-    2. Local environment or .env file
-    3. Supplied default value
+    Read secret from Streamlit secrets first
+    and .env/environment variables second.
     """
 
     try:
         if secret_name in st.secrets:
-            value = st.secrets[secret_name]
+            value = st.secrets[
+                secret_name
+            ]
 
             if value is not None:
-                return str(value).strip()
+                return str(
+                    value
+                ).strip()
 
     except Exception:
         pass
 
-    environment_value = os.getenv(secret_name)
+    environment_value = os.getenv(
+        secret_name
+    )
 
     if environment_value:
         return environment_value.strip()
@@ -44,14 +47,16 @@ def require_secret(
     secret_name: str,
 ) -> str:
     """
-    Return a required secret or raise a readable error.
+    Return required configuration value.
     """
 
-    secret_value = get_secret(secret_name)
+    value = get_secret(
+        secret_name
+    )
 
-    if not secret_value:
+    if not value:
         raise ValueError(
             f"{secret_name} was not configured."
         )
 
-    return secret_value
+    return value

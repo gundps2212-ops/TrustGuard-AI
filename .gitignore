@@ -1,8 +1,30 @@
-venv/
+# Environment
 .env
+.streamlit/secrets.toml
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
 
-uploads/*
-reports/*
-database/*.db
+# Virtual environment
+venv/
+.venv/
+
+# Local databases
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+*.log
+temp/
+tmp/

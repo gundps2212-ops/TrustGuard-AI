@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from sklearn.metrics import (
@@ -10,7 +9,9 @@ from sklearn.metrics import (
     precision_recall_fscore_support,
 )
 
-from modules.database_manager import get_connection
+from modules.supabase_manager import (
+    create_authenticated_client,
+)
 
 
 # =========================================================
@@ -26,69 +27,113 @@ STATUS_LABELS = (
 
 
 # =========================================================
-# DATABASE INITIALIZATION
+# COMPATIBILITY
 # =========================================================
 
 def init_evaluation_database() -> None:
     """
-    Create the evaluation_labels table.
+    Evaluation table is now managed by Supabase.
 
-    Each row stores:
-    - System-predicted claim status
-    - Manually assigned correct status
-    - User and verification report information
+    This function is kept so older pages importing it
+    do not break.
     """
 
-    create_table_query = """
-    CREATE TABLE IF NOT EXISTS evaluation_labels (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER NOT NULL,
-        verification_id INTEGER NOT NULL,
-        claim_index INTEGER NOT NULL,
-        claim_text TEXT NOT NULL,
-        predicted_status TEXT NOT NULL,
-        expected_status TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        UNIQUE (
-            user_id,
-            verification_id,
-            claim_index
+    return None
+
+
+# =========================================================
+# VALIDATION HELPERS
+# =========================================================
+
+def validate_user_id(
+    user_id: Any,
+) -> str:
+    """
+    Validate Supabase UUID user ID.
+
+    IMPORTANT:
+    Supabase user IDs are UUID strings, not integers.
+    """
+
+    clean_user_id = str(
+        user_id or ""
+    ).strip()
+
+    if not clean_user_id:
+        raise ValueError(
+            "Valid Supabase user ID is required."
         )
+
+    return clean_user_id
+
+
+def validate_verification_id(
+    verification_id: Any,
+) -> int:
+    """
+    Validate verification record ID.
+
+    Verification IDs remain integer BIGINT values.
+    """
+
+    try:
+        clean_id = int(
+            verification_id
+        )
+
+    except (
+        TypeError,
+        ValueError,
+    ) as error:
+        raise ValueError(
+            "Verification ID must be a valid integer."
+        ) from error
+
+    if clean_id <= 0:
+        raise ValueError(
+            "Verification ID must be greater than zero."
+        )
+
+    return clean_id
+
+
+def validate_tokens(
+    access_token: str,
+    refresh_token: str,
+) -> tuple[str, str]:
+    """
+    Validate Supabase authentication tokens.
+    """
+
+    clean_access_token = str(
+        access_token or ""
+    ).strip()
+
+    clean_refresh_token = str(
+        refresh_token or ""
+    ).strip()
+
+    if not clean_access_token:
+        raise ValueError(
+            "Supabase access token is required."
+        )
+
+    if not clean_refresh_token:
+        raise ValueError(
+            "Supabase refresh token is required."
+        )
+
+    return (
+        clean_access_token,
+        clean_refresh_token,
     )
-    """
 
-    with get_connection() as connection:
-        connection.execute(create_table_query)
-
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS
-            idx_evaluation_user_id
-            ON evaluation_labels(user_id)
-            """
-        )
-
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS
-            idx_evaluation_verification_id
-            ON evaluation_labels(verification_id)
-            """
-        )
-
-        connection.commit()
-
-
-# =========================================================
-# VALIDATION
-# =========================================================
 
 def normalize_status(
     status: Any,
 ) -> str:
     """
-    Convert a status into one of the supported labels.
+    Normalize verification status.
     """
 
     clean_status = str(
@@ -101,344 +146,505 @@ def normalize_status(
     return "Unsupported"
 
 
-def validate_positive_integer(
-    value: Any,
-    field_name: str,
-) -> int:
+def utc_timestamp() -> str:
     """
-    Convert a value into a positive integer.
+    Return current UTC timestamp.
     """
 
-    try:
-        converted_value = int(value)
-    except (TypeError, ValueError) as error:
-        raise ValueError(
-            f"{field_name} must be a valid number."
-        ) from error
-
-    if converted_value <= 0:
-        raise ValueError(
-            f"{field_name} must be greater than zero."
-        )
-
-    return converted_value
+    return datetime.now(
+        timezone.utc
+    ).isoformat()
 
 
 # =========================================================
-# SAVE GROUND-TRUTH LABELS
+# AUTHENTICATED CLIENT
+# =========================================================
+
+def get_authenticated_client(
+    access_token: str,
+    refresh_token: str,
+):
+    """
+    Create authenticated Supabase client.
+    """
+
+    (
+        clean_access_token,
+        clean_refresh_token,
+    ) = validate_tokens(
+        access_token,
+        refresh_token,
+    )
+
+    return create_authenticated_client(
+        access_token=clean_access_token,
+        refresh_token=clean_refresh_token,
+    )
+
+
+# =========================================================
+# VERIFY REPORT OWNERSHIP
+# =========================================================
+
+def verification_belongs_to_user(
+    user_id: str,
+    verification_id: int,
+    access_token: str,
+    refresh_token: str,
+) -> bool:
+    """
+    Check whether verification belongs to logged-in user.
+
+    RLS also protects this query.
+    """
+
+    clean_user_id = validate_user_id(
+        user_id
+    )
+
+    clean_verification_id = (
+        validate_verification_id(
+            verification_id
+        )
+    )
+
+    client = get_authenticated_client(
+        access_token,
+        refresh_token,
+    )
+
+    response = (
+        client
+        .table("verifications")
+        .select("id")
+        .eq(
+            "id",
+            clean_verification_id,
+        )
+        .eq(
+            "user_id",
+            clean_user_id,
+        )
+        .limit(1)
+        .execute()
+    )
+
+    return bool(
+        response.data
+    )
+
+
+# =========================================================
+# SAVE / UPDATE GROUND TRUTH
 # =========================================================
 
 def save_ground_truth_labels(
-    user_id: int,
+    user_id: str,
     verification_id: int,
     labels: list[dict[str, Any]],
+    access_token: str,
+    refresh_token: str,
 ) -> int:
     """
-    Save or update manually assigned expected statuses.
+    Save manually assigned ground-truth labels
+    into Supabase.
 
-    Args:
-        user_id:
-            Logged-in user ID.
-
-        verification_id:
-            Selected verification report ID.
-
-        labels:
-            List containing claim index, claim text,
-            predicted status and expected status.
-
-    Returns:
-        Number of labels saved.
+    Existing label rows are updated automatically
+    using the composite UNIQUE constraint:
+        user_id + verification_id + claim_index
     """
 
-    safe_user_id = validate_positive_integer(
-        user_id,
-        "User ID",
+    clean_user_id = validate_user_id(
+        user_id
     )
 
-    safe_verification_id = validate_positive_integer(
-        verification_id,
-        "Verification ID",
+    clean_verification_id = (
+        validate_verification_id(
+            verification_id
+        )
     )
 
     if not labels:
         raise ValueError(
-            "At least one evaluation label is required."
+            "At least one claim label is required."
         )
 
-    current_time = datetime.now().isoformat(
-        timespec="seconds"
+    owns_report = verification_belongs_to_user(
+        user_id=clean_user_id,
+        verification_id=clean_verification_id,
+        access_token=access_token,
+        refresh_token=refresh_token,
     )
 
-    query = """
-    INSERT INTO evaluation_labels (
-        user_id,
-        verification_id,
-        claim_index,
-        claim_text,
-        predicted_status,
-        expected_status,
-        created_at,
-        updated_at
+    if not owns_report:
+        raise PermissionError(
+            "Selected verification report does not "
+            "belong to the logged-in account."
+        )
+
+    client = get_authenticated_client(
+        access_token,
+        refresh_token,
     )
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 
-    ON CONFLICT (
-        user_id,
-        verification_id,
-        claim_index
-    )
-    DO UPDATE SET
-        claim_text = excluded.claim_text,
-        predicted_status = excluded.predicted_status,
-        expected_status = excluded.expected_status,
-        updated_at = excluded.updated_at
-    """
+    now = utc_timestamp()
 
-    saved_count = 0
+    rows_to_save = []
 
-    with get_connection() as connection:
-        for label in labels:
-            claim_index = validate_positive_integer(
-                label.get("claim_index"),
-                "Claim index",
-            )
+    for label in labels:
 
-            claim_text = str(
+        try:
+            claim_index = int(
                 label.get(
-                    "claim_text",
-                    "",
-                )
-            ).strip()
-
-            predicted_status = normalize_status(
-                label.get(
-                    "predicted_status"
+                    "claim_index",
+                    0,
                 )
             )
 
-            expected_status = normalize_status(
-                label.get(
-                    "expected_status"
-                )
+        except (
+            TypeError,
+            ValueError,
+        ):
+            continue
+
+        if claim_index <= 0:
+            continue
+
+        claim_text = str(
+            label.get(
+                "claim_text",
+                "",
             )
+        ).strip()
 
-            if not claim_text:
-                continue
+        if not claim_text:
+            continue
 
-            connection.execute(
-                query,
-                (
-                    safe_user_id,
-                    safe_verification_id,
-                    claim_index,
-                    claim_text,
-                    predicted_status,
-                    expected_status,
-                    current_time,
-                    current_time,
+        predicted_status = normalize_status(
+            label.get(
+                "predicted_status"
+            )
+        )
+
+        expected_status = normalize_status(
+            label.get(
+                "expected_status"
+            )
+        )
+
+        rows_to_save.append(
+            {
+                "user_id": clean_user_id,
+                "verification_id": (
+                    clean_verification_id
                 ),
-            )
+                "claim_index": claim_index,
+                "claim_text": claim_text,
+                "predicted_status": (
+                    predicted_status
+                ),
+                "expected_status": (
+                    expected_status
+                ),
+                "updated_at": now,
+            }
+        )
 
-            saved_count += 1
+    if not rows_to_save:
+        raise ValueError(
+            "No valid claim labels were provided."
+        )
 
-        connection.commit()
+    response = (
+        client
+        .table("evaluation_labels")
+        .upsert(
+            rows_to_save,
+            on_conflict=(
+                "user_id,"
+                "verification_id,"
+                "claim_index"
+            ),
+        )
+        .select(
+            "id, claim_index"
+        )
+        .execute()
+    )
 
-    return saved_count
+    if response.data is None:
+        return 0
+
+    return len(
+        response.data
+    )
 
 
 # =========================================================
-# LOAD LABELS
+# GET SAVED LABELS FOR ONE REPORT
 # =========================================================
 
 def get_report_evaluation_labels(
-    user_id: int,
+    user_id: str,
     verification_id: int,
+    access_token: str,
+    refresh_token: str,
 ) -> dict[int, str]:
     """
-    Return existing expected statuses for one report.
+    Return saved expected statuses for one report.
 
-    Returns:
-        Dictionary in the format:
+    Format:
         {
-            claim_index: expected_status
+            1: "Verified",
+            2: "Incorrect"
         }
     """
 
-    safe_user_id = validate_positive_integer(
-        user_id,
-        "User ID",
+    clean_user_id = validate_user_id(
+        user_id
     )
 
-    safe_verification_id = validate_positive_integer(
-        verification_id,
-        "Verification ID",
+    clean_verification_id = (
+        validate_verification_id(
+            verification_id
+        )
     )
 
-    query = """
-    SELECT
-        claim_index,
-        expected_status
-    FROM evaluation_labels
-    WHERE user_id = ?
-      AND verification_id = ?
-    ORDER BY claim_index ASC
-    """
+    client = get_authenticated_client(
+        access_token,
+        refresh_token,
+    )
 
-    with get_connection() as connection:
-        rows = connection.execute(
-            query,
-            (
-                safe_user_id,
-                safe_verification_id,
-            ),
-        ).fetchall()
+    response = (
+        client
+        .table("evaluation_labels")
+        .select(
+            "claim_index, expected_status"
+        )
+        .eq(
+            "user_id",
+            clean_user_id,
+        )
+        .eq(
+            "verification_id",
+            clean_verification_id,
+        )
+        .order(
+            "claim_index"
+        )
+        .execute()
+    )
 
-    return {
-        int(row["claim_index"]): row[
-            "expected_status"
-        ]
-        for row in rows
-    }
+    if not response.data:
+        return {}
 
+    labels = {}
+
+    for row in response.data:
+
+        try:
+            claim_index = int(
+                row.get(
+                    "claim_index",
+                    0,
+                )
+            )
+
+        except (
+            TypeError,
+            ValueError,
+        ):
+            continue
+
+        if claim_index <= 0:
+            continue
+
+        labels[
+            claim_index
+        ] = normalize_status(
+            row.get(
+                "expected_status"
+            )
+        )
+
+    return labels
+
+
+# =========================================================
+# GET EVALUATION ROWS
+# =========================================================
 
 def get_evaluation_rows(
-    user_id: int,
+    user_id: str,
+    access_token: str,
+    refresh_token: str,
     verification_id: int | None = None,
 ) -> list[dict[str, Any]]:
     """
-    Return evaluation rows for one user.
+    Return evaluation rows belonging to logged-in user.
 
-    When verification_id is supplied, only labels belonging
-    to that report are returned.
+    verification_id=None:
+        Return all evaluated reports.
+
+    verification_id supplied:
+        Return labels for one verification report.
     """
 
-    safe_user_id = validate_positive_integer(
-        user_id,
-        "User ID",
+    clean_user_id = validate_user_id(
+        user_id
     )
 
-    if verification_id is None:
-        query = """
-        SELECT
-            id,
-            verification_id,
-            claim_index,
-            claim_text,
-            predicted_status,
-            expected_status,
-            created_at,
-            updated_at
-        FROM evaluation_labels
-        WHERE user_id = ?
-        ORDER BY verification_id DESC, claim_index ASC
-        """
+    client = get_authenticated_client(
+        access_token,
+        refresh_token,
+    )
 
-        parameters = (
-            safe_user_id,
+    query = (
+        client
+        .table("evaluation_labels")
+        .select(
+            (
+                "id,"
+                "verification_id,"
+                "claim_index,"
+                "claim_text,"
+                "predicted_status,"
+                "expected_status,"
+                "created_at,"
+                "updated_at"
+            )
+        )
+        .eq(
+            "user_id",
+            clean_user_id,
+        )
+    )
+
+    if verification_id is not None:
+
+        clean_verification_id = (
+            validate_verification_id(
+                verification_id
+            )
         )
 
-    else:
-        safe_verification_id = validate_positive_integer(
-            verification_id,
-            "Verification ID",
+        query = query.eq(
+            "verification_id",
+            clean_verification_id,
         )
 
-        query = """
-        SELECT
-            id,
-            verification_id,
-            claim_index,
-            claim_text,
-            predicted_status,
-            expected_status,
-            created_at,
-            updated_at
-        FROM evaluation_labels
-        WHERE user_id = ?
-          AND verification_id = ?
-        ORDER BY claim_index ASC
-        """
-
-        parameters = (
-            safe_user_id,
-            safe_verification_id,
+    response = (
+        query
+        .order(
+            "verification_id",
+            desc=True,
         )
+        .order(
+            "claim_index",
+            desc=False,
+        )
+        .execute()
+    )
 
-    with get_connection() as connection:
-        rows = connection.execute(
-            query,
-            parameters,
-        ).fetchall()
+    if not response.data:
+        return []
 
-    return [
-        dict(row)
-        for row in rows
-    ]
+    return list(
+        response.data
+    )
 
 
 # =========================================================
-# DELETE EVALUATION LABELS
+# DELETE REPORT EVALUATION
 # =========================================================
 
 def delete_report_evaluation(
-    user_id: int,
+    user_id: str,
     verification_id: int,
+    access_token: str,
+    refresh_token: str,
 ) -> bool:
     """
     Delete manual evaluation labels for one report.
+
+    Original verification report remains saved.
     """
 
-    safe_user_id = validate_positive_integer(
-        user_id,
-        "User ID",
+    clean_user_id = validate_user_id(
+        user_id
     )
 
-    safe_verification_id = validate_positive_integer(
-        verification_id,
-        "Verification ID",
-    )
-
-    query = """
-    DELETE FROM evaluation_labels
-    WHERE user_id = ?
-      AND verification_id = ?
-    """
-
-    with get_connection() as connection:
-        cursor = connection.execute(
-            query,
-            (
-                safe_user_id,
-                safe_verification_id,
-            ),
+    clean_verification_id = (
+        validate_verification_id(
+            verification_id
         )
+    )
 
-        connection.commit()
+    client = get_authenticated_client(
+        access_token,
+        refresh_token,
+    )
 
-    return cursor.rowcount > 0
+    existing_response = (
+        client
+        .table("evaluation_labels")
+        .select("id")
+        .eq(
+            "user_id",
+            clean_user_id,
+        )
+        .eq(
+            "verification_id",
+            clean_verification_id,
+        )
+        .execute()
+    )
+
+    if not existing_response.data:
+        return False
+
+    response = (
+        client
+        .table("evaluation_labels")
+        .delete()
+        .eq(
+            "user_id",
+            clean_user_id,
+        )
+        .eq(
+            "verification_id",
+            clean_verification_id,
+        )
+        .select("id")
+        .execute()
+    )
+
+    return bool(
+        response.data
+    )
 
 
 # =========================================================
-# METRIC CALCULATION
+# CALCULATE PERFORMANCE METRICS
 # =========================================================
 
 def calculate_evaluation_metrics(
     evaluation_rows: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """
-    Calculate classification evaluation metrics.
+    Calculate TrustGuard classification performance.
 
-    Returns:
+    Metrics:
     - Accuracy
     - Macro Precision
     - Macro Recall
-    - Macro F1 Score
-    - Per-class metrics
+    - Macro F1
+    - Per-status metrics
     - Confusion matrix
     """
 
     if not evaluation_rows:
+
         return {
             "total_claims": 0,
             "correct_predictions": 0,
@@ -468,10 +674,18 @@ def calculate_evaluation_metrics(
         for row in evaluation_rows
     ]
 
+    # =====================================================
+    # ACCURACY
+    # =====================================================
+
     accuracy = accuracy_score(
         expected_statuses,
         predicted_statuses,
     )
+
+    # =====================================================
+    # MACRO METRICS
+    # =====================================================
 
     (
         macro_precision,
@@ -481,10 +695,16 @@ def calculate_evaluation_metrics(
     ) = precision_recall_fscore_support(
         expected_statuses,
         predicted_statuses,
-        labels=list(STATUS_LABELS),
+        labels=list(
+            STATUS_LABELS
+        ),
         average="macro",
         zero_division=0,
     )
+
+    # =====================================================
+    # CLASS-WISE METRICS
+    # =====================================================
 
     (
         class_precision,
@@ -494,33 +714,47 @@ def calculate_evaluation_metrics(
     ) = precision_recall_fscore_support(
         expected_statuses,
         predicted_statuses,
-        labels=list(STATUS_LABELS),
+        labels=list(
+            STATUS_LABELS
+        ),
         average=None,
         zero_division=0,
     )
 
+    # =====================================================
+    # CONFUSION MATRIX
+    # =====================================================
+
     matrix = confusion_matrix(
         expected_statuses,
         predicted_statuses,
-        labels=list(STATUS_LABELS),
+        labels=list(
+            STATUS_LABELS
+        ),
     )
 
     correct_predictions = sum(
-        expected == predicted
-        for expected, predicted in zip(
+        actual == predicted
+        for actual, predicted in zip(
             expected_statuses,
             predicted_statuses,
         )
     )
+
+    # =====================================================
+    # PER-CLASS RESULT
+    # =====================================================
 
     per_class_metrics = []
 
     for index, status in enumerate(
         STATUS_LABELS
     ):
+
         per_class_metrics.append(
             {
                 "status": status,
+
                 "precision": round(
                     float(
                         class_precision[index]
@@ -528,6 +762,7 @@ def calculate_evaluation_metrics(
                     * 100,
                     2,
                 ),
+
                 "recall": round(
                     float(
                         class_recall[index]
@@ -535,6 +770,7 @@ def calculate_evaluation_metrics(
                     * 100,
                     2,
                 ),
+
                 "f1_score": round(
                     float(
                         class_f1[index]
@@ -542,26 +778,41 @@ def calculate_evaluation_metrics(
                     * 100,
                     2,
                 ),
+
                 "support": int(
                     class_support[index]
                 ),
             }
         )
 
-    confusion_matrix_rows = []
+    # =====================================================
+    # CONFUSION MATRIX TABLE
+    # =====================================================
+
+    confusion_rows = []
 
     for row_index, actual_status in enumerate(
         STATUS_LABELS
     ):
+
         matrix_row = {
-            "Actual Status": actual_status,
+            "Actual Status": (
+                actual_status
+            )
         }
 
-        for column_index, predicted_status in enumerate(
+        for (
+            column_index,
+            predicted_status,
+        ) in enumerate(
             STATUS_LABELS
         ):
+
             matrix_row[
-                f"Predicted: {predicted_status}"
+                (
+                    "Predicted: "
+                    f"{predicted_status}"
+                )
             ] = int(
                 matrix[
                     row_index,
@@ -569,7 +820,7 @@ def calculate_evaluation_metrics(
                 ]
             )
 
-        confusion_matrix_rows.append(
+        confusion_rows.append(
             matrix_row
         )
 
@@ -577,29 +828,36 @@ def calculate_evaluation_metrics(
         "total_claims": len(
             evaluation_rows
         ),
+
         "correct_predictions": int(
             correct_predictions
         ),
+
         "accuracy": round(
             float(accuracy) * 100,
             2,
         ),
+
         "precision": round(
             float(macro_precision) * 100,
             2,
         ),
+
         "recall": round(
             float(macro_recall) * 100,
             2,
         ),
+
         "f1_score": round(
             float(macro_f1) * 100,
             2,
         ),
+
         "per_class_metrics": (
             per_class_metrics
         ),
+
         "confusion_matrix": (
-            confusion_matrix_rows
+            confusion_rows
         ),
     }

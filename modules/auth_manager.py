@@ -1,29 +1,16 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
-import secrets
-import sqlite3
-from datetime import datetime
-from pathlib import Path
 from typing import Any
 
-
-# =========================================================
-# DATABASE CONFIGURATION
-# =========================================================
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
-
-DATABASE_DIRECTORY = (
-    PROJECT_ROOT / "database"
+from modules.supabase_manager import (
+    create_authenticated_client,
+    create_supabase_client,
 )
 
-DATABASE_PATH = (
-    DATABASE_DIRECTORY / "trustguard.db"
-)
 
-PASSWORD_ITERATIONS = 200_000
+# =========================================================
+# CONSTANTS
+# =========================================================
 
 VALID_ROLES = {
     "user",
@@ -32,305 +19,145 @@ VALID_ROLES = {
 
 
 # =========================================================
-# DATABASE CONNECTION
-# =========================================================
-
-def get_connection() -> sqlite3.Connection:
-    """
-    Create and return a SQLite database connection.
-    """
-
-    DATABASE_DIRECTORY.mkdir(
-        parents=True,
-        exist_ok=True,
-    )
-
-    connection = sqlite3.connect(
-        DATABASE_PATH,
-        timeout=10,
-    )
-
-    connection.row_factory = sqlite3.Row
-
-    return connection
-
-
-# =========================================================
-# DATABASE INITIALIZATION
+# SQLITE COMPATIBILITY
 # =========================================================
 
 def init_auth_database() -> None:
     """
-    Create the users table.
-
-    For older databases, automatically add the role column.
+    Authentication is now handled by Supabase.
+    Kept only so old imports do not fail.
     """
 
-    create_table_query = """
-    CREATE TABLE IF NOT EXISTS users (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        username TEXT NOT NULL UNIQUE,
-        email TEXT NOT NULL UNIQUE,
-        password_hash TEXT NOT NULL,
-        password_salt TEXT NOT NULL,
-        role TEXT NOT NULL DEFAULT 'user',
-        created_at TEXT NOT NULL
-    )
-    """
-
-    with get_connection() as connection:
-        connection.execute(
-            create_table_query
-        )
-
-        existing_columns = {
-            row["name"]
-            for row in connection.execute(
-                "PRAGMA table_info(users)"
-            ).fetchall()
-        }
-
-        # Migration for old database
-        if "role" not in existing_columns:
-            connection.execute(
-                """
-                ALTER TABLE users
-                ADD COLUMN role TEXT NOT NULL DEFAULT 'user'
-                """
-            )
-
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS
-            idx_users_email
-            ON users(email)
-            """
-        )
-
-        connection.execute(
-            """
-            CREATE INDEX IF NOT EXISTS
-            idx_users_username
-            ON users(username)
-            """
-        )
-
-        connection.commit()
+    return None
 
 
 # =========================================================
-# PASSWORD HASHING
+# HELPERS
 # =========================================================
-
-def hash_password(
-    password: str,
-    salt: bytes | None = None,
-) -> tuple[str, str]:
-    """
-    Hash a password using PBKDF2-HMAC-SHA256.
-
-    Returns:
-        password_hash_hex
-        password_salt_hex
-    """
-
-    if not isinstance(password, str):
-        raise TypeError(
-            "Password must be a string."
-        )
-
-    if salt is None:
-        salt = secrets.token_bytes(16)
-
-    password_hash = hashlib.pbkdf2_hmac(
-        "sha256",
-        password.encode("utf-8"),
-        salt,
-        PASSWORD_ITERATIONS,
-    )
-
-    return (
-        password_hash.hex(),
-        salt.hex(),
-    )
-
-
-def verify_password(
-    entered_password: str,
-    stored_hash: str,
-    stored_salt: str,
-) -> bool:
-    """
-    Verify an entered password against the saved hash.
-    """
-
-    try:
-        salt_bytes = bytes.fromhex(
-            stored_salt
-        )
-
-        entered_hash, _ = hash_password(
-            password=entered_password,
-            salt=salt_bytes,
-        )
-
-        return hmac.compare_digest(
-            entered_hash,
-            stored_hash,
-        )
-
-    except (
-        TypeError,
-        ValueError,
-    ):
-        return False
-
-
-# =========================================================
-# VALIDATION FUNCTIONS
-# =========================================================
-
-def normalize_username(
-    username: str,
-) -> str:
-    """
-    Remove extra spaces from username.
-    """
-
-    return username.strip()
-
 
 def normalize_email(
     email: str,
 ) -> str:
-    """
-    Normalize email address.
-    """
+    return str(
+        email or ""
+    ).strip().lower()
 
-    return email.strip().lower()
 
+def normalize_username(
+    username: str,
+) -> str:
+    return str(
+        username or ""
+    ).strip()
+
+
+def normalize_role(
+    role: Any,
+) -> str:
+
+    clean_role = str(
+        role or "user"
+    ).strip().lower()
+
+    if clean_role not in VALID_ROLES:
+        return "user"
+
+    return clean_role
+
+
+# =========================================================
+# VALIDATION
+# =========================================================
 
 def validate_username(
     username: str,
 ) -> tuple[bool, str]:
-    """
-    Validate username.
-    """
 
-    clean_username = normalize_username(
+    username = normalize_username(
         username
     )
 
-    if not clean_username:
+    if not username:
         return (
             False,
             "Username is required.",
         )
 
-    if len(clean_username) < 3:
+    if len(username) < 3:
         return (
             False,
             "Username must contain at least 3 characters.",
         )
 
-    if len(clean_username) > 30:
+    if len(username) > 30:
         return (
             False,
-            "Username must contain at most 30 characters.",
+            "Username is too long.",
         )
 
-    allowed_characters = (
-        clean_username
+    cleaned = (
+        username
         .replace("_", "")
         .replace("-", "")
     )
 
-    if not allowed_characters.isalnum():
+    if not cleaned.isalnum():
         return (
             False,
-            "Username can contain only letters, numbers, "
-            "underscore and hyphen.",
+            "Username can contain only letters, "
+            "numbers, underscore and hyphen.",
         )
 
     return (
         True,
-        "Username is valid.",
+        "Valid username.",
     )
 
 
 def validate_email(
     email: str,
 ) -> tuple[bool, str]:
-    """
-    Perform basic email validation.
-    """
 
-    clean_email = normalize_email(
+    email = normalize_email(
         email
     )
 
-    if not clean_email:
+    if not email:
         return (
             False,
-            "Email address is required.",
+            "Email is required.",
         )
 
-    if len(clean_email) > 254:
+    if email.count("@") != 1:
         return (
             False,
-            "Email address is too long.",
+            "Please enter a valid email.",
         )
 
-    if clean_email.count("@") != 1:
-        return (
-            False,
-            "Please enter a valid email address.",
-        )
-
-    local_part, domain_part = clean_email.split(
+    local_part, domain = email.split(
         "@",
-        maxsplit=1,
+        1,
     )
 
-    if not local_part:
-        return (
-            False,
-            "Email username is missing.",
-        )
-
     if (
-        not domain_part
-        or "." not in domain_part
+        not local_part
+        or not domain
+        or "." not in domain
     ):
         return (
             False,
-            "Please enter a valid email domain.",
-        )
-
-    if domain_part.startswith("."):
-        return (
-            False,
-            "Please enter a valid email address.",
-        )
-
-    if domain_part.endswith("."):
-        return (
-            False,
-            "Please enter a valid email address.",
+            "Please enter a valid email.",
         )
 
     return (
         True,
-        "Email address is valid.",
+        "Valid email.",
     )
 
 
 def validate_password(
     password: str,
 ) -> tuple[bool, str]:
-    """
-    Validate password strength.
-    """
 
     if not password:
         return (
@@ -344,206 +171,96 @@ def validate_password(
             "Password must contain at least 8 characters.",
         )
 
-    if len(password) > 128:
-        return (
-            False,
-            "Password must contain at most 128 characters.",
-        )
-
-    has_uppercase = any(
-        character.isupper()
-        for character in password
-    )
-
-    has_lowercase = any(
-        character.islower()
-        for character in password
-    )
-
-    has_number = any(
-        character.isdigit()
-        for character in password
-    )
-
-    if not has_uppercase:
-        return (
-            False,
-            "Password must contain at least one uppercase letter.",
-        )
-
-    if not has_lowercase:
-        return (
-            False,
-            "Password must contain at least one lowercase letter.",
-        )
-
-    if not has_number:
-        return (
-            False,
-            "Password must contain at least one number.",
-        )
-
     return (
         True,
-        "Password is valid.",
-    )
-
-
-def validate_registration(
-    username: str,
-    email: str,
-    password: str,
-    confirm_password: str,
-) -> tuple[bool, str]:
-    """
-    Validate registration form fields.
-    """
-
-    username_valid, username_message = (
-        validate_username(
-            username
-        )
-    )
-
-    if not username_valid:
-        return (
-            False,
-            username_message,
-        )
-
-    email_valid, email_message = (
-        validate_email(
-            email
-        )
-    )
-
-    if not email_valid:
-        return (
-            False,
-            email_message,
-        )
-
-    password_valid, password_message = (
-        validate_password(
-            password
-        )
-    )
-
-    if not password_valid:
-        return (
-            False,
-            password_message,
-        )
-
-    if password != confirm_password:
-        return (
-            False,
-            "Password and confirm password do not match.",
-        )
-
-    return (
-        True,
-        "Registration information is valid.",
+        "Valid password.",
     )
 
 
 # =========================================================
-# USER LOOKUP FUNCTIONS
+# GET PROFILE
 # =========================================================
 
-def username_exists(
-    username: str,
-) -> bool:
+def get_user_profile(
+    user_id: str,
+    access_token: str,
+    refresh_token: str,
+) -> dict[str, Any]:
     """
-    Check whether username already exists.
-    """
-
-    clean_username = normalize_username(
-        username
-    ).lower()
-
-    query = """
-    SELECT id
-    FROM users
-    WHERE LOWER(username) = ?
-    LIMIT 1
+    Read application profile from public.profiles.
     """
 
-    with get_connection() as connection:
-        row = connection.execute(
-            query,
-            (clean_username,),
-        ).fetchone()
+    clean_user_id = str(
+        user_id or ""
+    ).strip()
 
-    return row is not None
+    if not clean_user_id:
+        raise ValueError(
+            "User ID is required."
+        )
 
-
-def email_exists(
-    email: str,
-) -> bool:
-    """
-    Check whether email address already exists.
-    """
-
-    clean_email = normalize_email(
-        email
+    client = create_authenticated_client(
+        access_token=access_token,
+        refresh_token=refresh_token,
     )
 
-    query = """
-    SELECT id
-    FROM users
-    WHERE LOWER(email) = ?
-    LIMIT 1
-    """
+    response = (
+        client
+        .table("profiles")
+        .select(
+            "id, username, role, created_at"
+        )
+        .eq(
+            "id",
+            clean_user_id,
+        )
+        .limit(1)
+        .execute()
+    )
 
-    with get_connection() as connection:
-        row = connection.execute(
-            query,
-            (clean_email,),
-        ).fetchone()
+    if not response.data:
+        return {
+            "id": clean_user_id,
+            "username": "User",
+            "role": "user",
+            "created_at": "",
+        }
 
-    return row is not None
+    profile = response.data[0]
 
+    return {
+        "id": str(
+            profile.get(
+                "id",
+                clean_user_id,
+            )
+        ),
 
-def get_user_by_id(
-    user_id: int,
-) -> dict[str, Any] | None:
-    """
-    Get public user information using user ID.
-    """
+        "username": str(
+            profile.get(
+                "username",
+                "User",
+            )
+        ),
 
-    if not isinstance(user_id, int):
-        return None
+        "role": normalize_role(
+            profile.get(
+                "role",
+                "user",
+            )
+        ),
 
-    if user_id <= 0:
-        return None
-
-    query = """
-    SELECT
-        id,
-        username,
-        email,
-        role,
-        created_at
-    FROM users
-    WHERE id = ?
-    LIMIT 1
-    """
-
-    with get_connection() as connection:
-        row = connection.execute(
-            query,
-            (user_id,),
-        ).fetchone()
-
-    if row is None:
-        return None
-
-    return dict(row)
+        "created_at": str(
+            profile.get(
+                "created_at",
+                "",
+            )
+        ),
+    }
 
 
 # =========================================================
-# USER REGISTRATION
+# REGISTER USER
 # =========================================================
 
 def register_user(
@@ -553,24 +270,49 @@ def register_user(
     confirm_password: str,
 ) -> tuple[bool, str]:
     """
-    Register a new TrustGuard AI user.
+    Register new account using Supabase Auth.
     """
 
-    init_auth_database()
-
-    is_valid, validation_message = (
-        validate_registration(
-            username=username,
-            email=email,
-            password=password,
-            confirm_password=confirm_password,
+    username_ok, message = (
+        validate_username(
+            username
         )
     )
 
-    if not is_valid:
+    if not username_ok:
         return (
             False,
-            validation_message,
+            message,
+        )
+
+    email_ok, message = (
+        validate_email(
+            email
+        )
+    )
+
+    if not email_ok:
+        return (
+            False,
+            message,
+        )
+
+    password_ok, message = (
+        validate_password(
+            password
+        )
+    )
+
+    if not password_ok:
+        return (
+            False,
+            message,
+        )
+
+    if password != confirm_password:
+        return (
+            False,
+            "Password and confirm password do not match.",
         )
 
     clean_username = normalize_username(
@@ -581,343 +323,337 @@ def register_user(
         email
     )
 
-    if username_exists(clean_username):
-        return (
-            False,
-            "This username is already registered.",
-        )
-
-    if email_exists(clean_email):
-        return (
-            False,
-            "This email address is already registered.",
-        )
-
-    password_hash, password_salt = (
-        hash_password(
-            password
-        )
-    )
-
-    created_at = datetime.now().isoformat(
-        timespec="seconds"
-    )
-
-    insert_query = """
-    INSERT INTO users (
-        username,
-        email,
-        password_hash,
-        password_salt,
-        role,
-        created_at
-    )
-    VALUES (?, ?, ?, ?, ?, ?)
-    """
-
-    values = (
-        clean_username,
-        clean_email,
-        password_hash,
-        password_salt,
-        "user",
-        created_at,
-    )
-
     try:
-        with get_connection() as connection:
-            connection.execute(
-                insert_query,
-                values,
+
+        client = create_supabase_client()
+
+        response = client.auth.sign_up(
+            {
+                "email": clean_email,
+
+                "password": password,
+
+                "options": {
+                    "data": {
+                        "username": clean_username,
+                    }
+                },
+            }
+        )
+
+        if response.user is None:
+            return (
+                False,
+                "Unable to create account.",
             )
 
-            connection.commit()
+        if response.session is None:
+            return (
+                True,
+                "Account created. "
+                "Please confirm your email before login.",
+            )
 
         return (
             True,
-            "Account created successfully. You can now log in.",
+            "Account created successfully. "
+            "You can login now.",
         )
 
-    except sqlite3.IntegrityError as error:
-        error_message = str(
-            error
-        ).lower()
+    except Exception as error:
 
-        if "username" in error_message:
-            return (
-                False,
-                "This username is already registered.",
-            )
-
-        if "email" in error_message:
-            return (
-                False,
-                "This email address is already registered.",
-            )
+        print(
+            f"REGISTER ERROR: {error}"
+        )
 
         return (
             False,
-            "Unable to create the account.",
-        )
-
-    except sqlite3.Error as error:
-        return (
-            False,
-            f"Database error: {error}",
+            f"Registration failed: {error}",
         )
 
 
 # =========================================================
-# USER LOGIN
+# AUTHENTICATE USER
 # =========================================================
 
 def authenticate_user(
-    username_or_email: str,
+    email: str,
     password: str,
 ) -> dict[str, Any] | None:
     """
-    Authenticate user using username or email.
-
-    Returns:
-        User dictionary when authentication succeeds.
-        None when authentication fails.
+    Login existing user using Supabase Auth.
     """
 
-    init_auth_database()
-
-    login_value = (
-        username_or_email
-        .strip()
-        .lower()
+    clean_email = normalize_email(
+        email
     )
 
-    if not login_value:
+    if not clean_email:
+        print(
+            "LOGIN ERROR: Email is empty."
+        )
         return None
 
     if not password:
+        print(
+            "LOGIN ERROR: Password is empty."
+        )
         return None
 
-    query = """
-    SELECT
-        id,
-        username,
-        email,
-        role,
-        password_hash,
-        password_salt,
-        created_at
-    FROM users
-    WHERE LOWER(username) = ?
-       OR LOWER(email) = ?
-    LIMIT 1
-    """
+    try:
 
-    with get_connection() as connection:
-        row = connection.execute(
-            query,
-            (
-                login_value,
-                login_value,
+        client = create_supabase_client()
+
+        response = (
+            client.auth.sign_in_with_password(
+                {
+                    "email": clean_email,
+                    "password": password,
+                }
+            )
+        )
+
+        if response.user is None:
+            print(
+                "LOGIN ERROR: Supabase returned no user."
+            )
+            return None
+
+        if response.session is None:
+            print(
+                "LOGIN ERROR: Supabase returned no session."
+            )
+            return None
+
+        user_id = str(
+            response.user.id
+        )
+
+        access_token = str(
+            response.session.access_token
+        )
+
+        refresh_token = str(
+            response.session.refresh_token
+        )
+
+        profile = get_user_profile(
+            user_id=user_id,
+            access_token=access_token,
+            refresh_token=refresh_token,
+        )
+
+        email_value = (
+            response.user.email
+            or clean_email
+        )
+
+        return {
+            "id": user_id,
+
+            "username": profile.get(
+                "username",
+                "User",
             ),
-        ).fetchone()
 
-    if row is None:
+            "email": str(
+                email_value
+            ),
+
+            "role": normalize_role(
+                profile.get(
+                    "role",
+                    "user",
+                )
+            ),
+
+            "created_at": profile.get(
+                "created_at",
+                "",
+            ),
+
+            "access_token": (
+                access_token
+            ),
+
+            "refresh_token": (
+                refresh_token
+            ),
+        }
+
+    except Exception as error:
+
+        print(
+            f"LOGIN ERROR: {error}"
+        )
+
         return None
-
-    password_is_correct = verify_password(
-        entered_password=password,
-        stored_hash=row["password_hash"],
-        stored_salt=row["password_salt"],
-    )
-
-    if not password_is_correct:
-        return None
-
-    role = row["role"] or "user"
-
-    if role not in VALID_ROLES:
-        role = "user"
-
-    return {
-        "id": int(row["id"]),
-        "username": row["username"],
-        "email": row["email"],
-        "role": role,
-        "created_at": row["created_at"],
-    }
 
 
 # =========================================================
-# ADMIN FUNCTIONS
+# RESTORE SESSION
 # =========================================================
 
-def promote_user_to_admin(
-    email: str,
-) -> tuple[bool, str]:
+def restore_user_session(
+    access_token: str,
+    refresh_token: str,
+) -> dict[str, Any] | None:
     """
-    Promote an existing account to admin using email.
+    Restore Supabase login session.
     """
 
-    init_auth_database()
+    if not access_token:
+        return None
 
-    clean_email = normalize_email(
-        email
-    )
-
-    if not clean_email:
-        return (
-            False,
-            "Email address is required.",
-        )
-
-    query = """
-    UPDATE users
-    SET role = 'admin'
-    WHERE LOWER(email) = ?
-    """
+    if not refresh_token:
+        return None
 
     try:
-        with get_connection() as connection:
-            cursor = connection.execute(
-                query,
-                (clean_email,),
-            )
 
-            connection.commit()
-
-        if cursor.rowcount == 0:
-            return (
-                False,
-                "No registered account was found "
-                "with this email address.",
-            )
-
-        return (
-            True,
-            "User account promoted to admin successfully.",
+        client = create_authenticated_client(
+            access_token=access_token,
+            refresh_token=refresh_token,
         )
 
-    except sqlite3.Error as error:
-        return (
-            False,
-            f"Database error: {error}",
+        user_response = (
+            client.auth.get_user()
         )
 
+        if user_response.user is None:
+            return None
 
-def demote_admin_to_user(
-    email: str,
-) -> tuple[bool, str]:
-    """
-    Change an admin account back to a normal user.
-    """
-
-    init_auth_database()
-
-    clean_email = normalize_email(
-        email
-    )
-
-    if not clean_email:
-        return (
-            False,
-            "Email address is required.",
+        session = (
+            client.auth.get_session()
         )
 
-    query = """
-    UPDATE users
-    SET role = 'user'
-    WHERE LOWER(email) = ?
+        if session is None:
+            return None
+
+        user_id = str(
+            user_response.user.id
+        )
+
+        current_access_token = str(
+            session.access_token
+        )
+
+        current_refresh_token = str(
+            session.refresh_token
+        )
+
+        profile = get_user_profile(
+            user_id=user_id,
+            access_token=current_access_token,
+            refresh_token=current_refresh_token,
+        )
+
+        return {
+            "id": user_id,
+
+            "username": profile.get(
+                "username",
+                "User",
+            ),
+
+            "email": str(
+                user_response.user.email
+                or ""
+            ),
+
+            "role": normalize_role(
+                profile.get(
+                    "role",
+                    "user",
+                )
+            ),
+
+            "created_at": profile.get(
+                "created_at",
+                "",
+            ),
+
+            "access_token": (
+                current_access_token
+            ),
+
+            "refresh_token": (
+                current_refresh_token
+            ),
+        }
+
+    except Exception as error:
+
+        print(
+            f"SESSION RESTORE ERROR: {error}"
+        )
+
+        return None
+
+
+# =========================================================
+# LOGOUT
+# =========================================================
+
+def logout_user(
+    access_token: str,
+    refresh_token: str,
+) -> bool:
     """
+    Logout Supabase user.
+    """
+
+    if not access_token:
+        return False
+
+    if not refresh_token:
+        return False
 
     try:
-        with get_connection() as connection:
-            cursor = connection.execute(
-                query,
-                (clean_email,),
-            )
 
-            connection.commit()
-
-        if cursor.rowcount == 0:
-            return (
-                False,
-                "No registered account was found "
-                "with this email address.",
-            )
-
-        return (
-            True,
-            "Admin account changed to a normal user.",
+        client = create_authenticated_client(
+            access_token=access_token,
+            refresh_token=refresh_token,
         )
 
-    except sqlite3.Error as error:
-        return (
-            False,
-            f"Database error: {error}",
+        client.auth.sign_out()
+
+        return True
+
+    except Exception as error:
+
+        print(
+            f"LOGOUT ERROR: {error}"
         )
 
+        return False
 
-def get_all_users(
-    limit: int = 100,
-) -> list[dict[str, Any]]:
-    """
-    Return users for the Admin Dashboard.
 
-    Password hashes and salts are not returned.
-    """
+# =========================================================
+# ADMIN CHECK
+# =========================================================
+
+def is_admin(
+    user_id: str,
+    access_token: str,
+    refresh_token: str,
+) -> bool:
 
     try:
-        safe_limit = int(limit)
-    except (TypeError, ValueError):
-        safe_limit = 100
 
-    safe_limit = max(
-        1,
-        min(safe_limit, 500),
-    )
+        profile = get_user_profile(
+            user_id=user_id,
+            access_token=access_token,
+            refresh_token=refresh_token,
+        )
 
-    query = """
-    SELECT
-        id,
-        username,
-        email,
-        role,
-        created_at
-    FROM users
-    ORDER BY id DESC
-    LIMIT ?
-    """
+        return (
+            profile.get(
+                "role",
+                "user",
+            )
+            == "admin"
+        )
 
-    with get_connection() as connection:
-        rows = connection.execute(
-            query,
-            (safe_limit,),
-        ).fetchall()
+    except Exception:
 
-    return [
-        dict(row)
-        for row in rows
-    ]
-
-
-def count_users() -> int:
-    """
-    Return total number of registered users.
-    """
-
-    query = """
-    SELECT COUNT(*) AS total_users
-    FROM users
-    """
-
-    with get_connection() as connection:
-        row = connection.execute(
-            query
-        ).fetchone()
-
-    if row is None:
-        return 0
-
-    return int(
-        row["total_users"] or 0
-    )
+        return False
