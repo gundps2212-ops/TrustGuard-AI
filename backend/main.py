@@ -4,7 +4,7 @@ import os
 from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Header, HTTPException, UploadFile
+from fastapi import Depends, FastAPI, File, Form, Header, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -206,9 +206,9 @@ def verify(payload: VerifyPayload, session: dict[str, Any] = Depends(get_session
 
 @app.post("/api/verify/pdf")
 async def verify_pdf(
-    question: str,
+    question: str = Form(...),
     files: list[UploadFile] = File(...),
-    run_nli: bool = False,
+    run_nli: bool = Form(False),
     session: dict[str, Any] = Depends(get_session),
 ):
     if not question.strip():
@@ -217,16 +217,18 @@ async def verify_pdf(
         raise HTTPException(status_code=400, detail="Upload at least one PDF.")
     try:
         import io
-        from types import SimpleNamespace
         uploaded = []
         for item in files:
-            if item.content_type != "application/pdf" and not item.filename.lower().endswith(".pdf"):
-                raise HTTPException(status_code=400, detail=f"{item.filename} is not a PDF.")
+            filename = item.filename or "uploaded_document.pdf"
+            if item.content_type != "application/pdf" and not filename.lower().endswith(".pdf"):
+                raise HTTPException(status_code=400, detail=f"{filename} is not a PDF.")
             raw = await item.read()
             if len(raw) > 15 * 1024 * 1024:
                 raise HTTPException(status_code=413, detail="Each PDF must be 15 MB or smaller.")
-            uploaded.append(SimpleNamespace(name=item.filename, file=io.BytesIO(raw)))
-        # The existing PDF reader expects file-like objects with a name attribute.
+            stream = io.BytesIO(raw)
+            stream.name = filename
+            uploaded.append(stream)
+        # Reuse the existing PDF reader without changing its interface.
         page_records, page_count = extract_multiple_pdfs(uploaded)
         from modules.evidence_retriever import build_evidence_index, search_evidence
         chunks, index = build_evidence_index(page_records)
