@@ -28,3 +28,7 @@ Thumbs.db
 *.log
 temp/
 tmp/
+# Frontend
+node_modules/
+frontend/dist/
+frontend/.env
