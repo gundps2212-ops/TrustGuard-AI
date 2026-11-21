@@ -6,6 +6,8 @@ import inspect
 
 import streamlit as st
 
+from modules.ui_theme import apply_trustguard_theme
+
 # =========================================================
 # AUTHENTICATION
 # =========================================================
@@ -169,6 +171,9 @@ st.set_page_config(
     page_icon="🛡️",
     layout="wide",
 )
+
+# Premium responsive UI layer (keeps the existing verification workflow intact).
+apply_trustguard_theme()
 
 # =========================================================
 # DATABASE INITIALIZATION
