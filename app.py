@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 import inspect
 
 import streamlit as st
+from modules.theme import apply_futuristic_theme
 from modules.visual_fx import render_trustguard_hero
 
 # =========================================================
@@ -170,6 +171,9 @@ st.set_page_config(
     page_icon="🛡️",
     layout="wide",
 )
+
+# Visual-only premium theme; application logic and data services remain unchanged.
+apply_futuristic_theme()
 
 # =========================================================
 # DATABASE INITIALIZATION
