@@ -14,6 +14,7 @@ from modules.auth_manager import authenticate_user, register_user
 from modules.claim_extractor import extract_factual_claims
 from modules.database_manager import get_verification_history, save_verification
 from modules.llm import generate_ai_answer
+from modules.llm_comparison import generate_llama_answer, generate_openai_answer
 from modules.nli_detector import analyze_evidence_nli
 from modules.pdf_reader import extract_multiple_pdfs
 from modules.score import count_statuses, get_trust_level
@@ -58,7 +59,7 @@ class VerifyPayload(BaseModel):
     question: str = Field(min_length=3, max_length=5000)
     answer: str | None = None
     use_web: bool = True
-    compare_llama: bool = False
+    compare_models: bool = True
     domain_group: str = "No domain filter"
     minimum_relevance: float = Field(default=0.35, ge=0, le=1)
     run_nli: bool = False
@@ -88,6 +89,32 @@ def get_session(
         }
     except Exception:
         raise HTTPException(status_code=401, detail="Invalid or expired Supabase session.")
+
+
+def build_model_comparison(question: str, gemini_answer: str) -> list[dict[str, str]]:
+    """Run Gemini, Llama and OpenAI independently; one provider failure won't stop others."""
+    models = [{
+        "provider": "Gemini",
+        "model": os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash-lite"),
+        "status": "success",
+        "answer": gemini_answer,
+    }]
+    providers = [
+        ("Llama", os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile"), generate_llama_answer),
+        ("OpenAI GPT", os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini"), generate_openai_answer),
+    ]
+    for name, model_name, generate in providers:
+        try:
+            models.append({"provider": name, "model": model_name, "status": "success", "answer": generate(question)})
+        except Exception as error:
+            models.append({
+                "provider": name,
+                "model": model_name,
+                "status": "unavailable",
+                "answer": "",
+                "error": str(error)[:240],
+            })
+    return models
 
 
 @app.get("/api/health")
@@ -148,6 +175,9 @@ def verify(payload: VerifyPayload, session: dict[str, Any] = Depends(get_session
 
     try:
         answer = payload.answer.strip() if payload.answer else generate_ai_answer(question)
+        model_comparison = build_model_comparison(
+            question, generate_ai_answer(question) if payload.answer else answer
+        ) if payload.compare_models else []
         if not answer:
             raise ValueError("The AI answer is empty.")
 
@@ -189,6 +219,7 @@ def verify(payload: VerifyPayload, session: dict[str, Any] = Depends(get_session
             "trust_metrics": metrics,
             "status_counts": statuses,
             "document_name": "Web evidence" if payload.use_web else "No document",
+            "model_comparison": model_comparison,
         }
 
         saved_id = save_verification(
@@ -209,6 +240,7 @@ async def verify_pdf(
     question: str = Form(...),
     files: list[UploadFile] = File(...),
     run_nli: bool = Form(False),
+    compare_models: bool = Form(True),
     session: dict[str, Any] = Depends(get_session),
 ):
     if not question.strip():
@@ -233,6 +265,7 @@ async def verify_pdf(
         from modules.evidence_retriever import build_evidence_index, search_evidence
         chunks, index = build_evidence_index(page_records)
         answer = generate_ai_answer(question.strip())
+        model_comparison = build_model_comparison(question.strip(), answer) if compare_models else []
         claims = extract_factual_claims(answer)
         claim_items = []
         for claim in claims[:10]:
@@ -257,6 +290,7 @@ async def verify_pdf(
             "status_counts": count_statuses(results),
             "document_name": ", ".join(item.name for item in uploaded),
             "total_pages": page_count,
+            "model_comparison": model_comparison,
         }
         saved_id = save_verification(report, session["user_id"], session["access_token"], session["refresh_token"])
         return {"id": saved_id, **report}
