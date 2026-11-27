@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 import inspect
 
 import streamlit as st
+from modules.visual_fx import render_trustguard_hero
 
 # =========================================================
 # AUTHENTICATION
@@ -1810,6 +1811,9 @@ st.write(
     "trusted PDF documents, Hybrid Retrieval, "
     "Cross-Encoder reranking, NLI and web evidence."
 )
+
+# Isolated visual layer: does not modify verification, authentication or Supabase logic.
+render_trustguard_hero(height=510)
 
 st.divider()
 
