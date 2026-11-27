@@ -14,6 +14,7 @@ from modules.auth_manager import authenticate_user, register_user
 from modules.claim_extractor import extract_factual_claims
 from modules.database_manager import get_verification_history, save_verification
 from modules.llm import generate_ai_answer
+from modules.llm_comparison import generate_llama_answer, generate_openai_answer
 from modules.nli_detector import analyze_evidence_nli
 from modules.pdf_reader import extract_multiple_pdfs
 from modules.score import count_statuses, get_trust_level
@@ -58,7 +59,7 @@ class VerifyPayload(BaseModel):
     question: str = Field(min_length=3, max_length=5000)
     answer: str | None = None
     use_web: bool = True
-    compare_llama: bool = False
+    compare_models: bool = True
     domain_group: str = "No domain filter"
     minimum_relevance: float = Field(default=0.35, ge=0, le=1)
     run_nli: bool = False
