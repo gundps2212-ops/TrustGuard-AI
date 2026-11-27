@@ -91,6 +91,32 @@ def get_session(
         raise HTTPException(status_code=401, detail="Invalid or expired Supabase session.")
 
 
+def build_model_comparison(question: str, gemini_answer: str) -> list[dict[str, str]]:
+    """Run Gemini, Llama and OpenAI independently; one provider failure won't stop others."""
+    models = [{
+        "provider": "Gemini",
+        "model": os.getenv("GEMINI_MODEL_NAME", "gemini-3.5-flash-lite"),
+        "status": "success",
+        "answer": gemini_answer,
+    }]
+    providers = [
+        ("Llama", os.getenv("GROQ_MODEL_NAME", "llama-3.3-70b-versatile"), generate_llama_answer),
+        ("OpenAI GPT", os.getenv("OPENAI_MODEL_NAME", "gpt-4o-mini"), generate_openai_answer),
+    ]
+    for name, model_name, generate in providers:
+        try:
+            models.append({"provider": name, "model": model_name, "status": "success", "answer": generate(question)})
+        except Exception as error:
+            models.append({
+                "provider": name,
+                "model": model_name,
+                "status": "unavailable",
+                "answer": "",
+                "error": str(error)[:240],
+            })
+    return models
+
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "service": "TrustGuard AI API", "version": "2.0.0"}
@@ -149,6 +175,7 @@ def verify(payload: VerifyPayload, session: dict[str, Any] = Depends(get_session
 
     try:
         answer = payload.answer.strip() if payload.answer else generate_ai_answer(question)
+        model_comparison = build_model_comparison(question, answer) if payload.compare_models else []
         if not answer:
             raise ValueError("The AI answer is empty.")
 
@@ -190,6 +217,7 @@ def verify(payload: VerifyPayload, session: dict[str, Any] = Depends(get_session
             "trust_metrics": metrics,
             "status_counts": statuses,
             "document_name": "Web evidence" if payload.use_web else "No document",
+            "model_comparison": model_comparison,
         }
 
         saved_id = save_verification(
@@ -210,6 +238,7 @@ async def verify_pdf(
     question: str = Form(...),
     files: list[UploadFile] = File(...),
     run_nli: bool = Form(False),
+    compare_models: bool = Form(True),
     session: dict[str, Any] = Depends(get_session),
 ):
     if not question.strip():
@@ -234,6 +263,7 @@ async def verify_pdf(
         from modules.evidence_retriever import build_evidence_index, search_evidence
         chunks, index = build_evidence_index(page_records)
         answer = generate_ai_answer(question.strip())
+        model_comparison = build_model_comparison(question.strip(), answer) if compare_models else []
         claims = extract_factual_claims(answer)
         claim_items = []
         for claim in claims[:10]:
@@ -258,6 +288,7 @@ async def verify_pdf(
             "status_counts": count_statuses(results),
             "document_name": ", ".join(item.name for item in uploaded),
             "total_pages": page_count,
+            "model_comparison": model_comparison,
         }
         saved_id = save_verification(report, session["user_id"], session["access_token"], session["refresh_token"])
         return {"id": saved_id, **report}
