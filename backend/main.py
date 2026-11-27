@@ -175,7 +175,9 @@ def verify(payload: VerifyPayload, session: dict[str, Any] = Depends(get_session
 
     try:
         answer = payload.answer.strip() if payload.answer else generate_ai_answer(question)
-        model_comparison = build_model_comparison(\n            question, generate_ai_answer(question) if payload.answer else answer\n        ) if payload.compare_models else []
+        model_comparison = build_model_comparison(
+            question, generate_ai_answer(question) if payload.answer else answer
+        ) if payload.compare_models else []
         if not answer:
             raise ValueError("The AI answer is empty.")
 
